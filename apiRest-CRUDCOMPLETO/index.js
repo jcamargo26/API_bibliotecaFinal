@@ -1,93 +1,132 @@
 const express = require('express');
+const db = require('./database'); // Importa a conexão com o SQLite definida no outro arquivo
 const app = express();
-const PORT = 3000;
 
+// Middleware para permitir que o Express entenda requisições com corpo em JSON
 app.use(express.json());
 
-// 1. Mínimo 10 registros iniciais (Requisito do trabalho)
-let livros = [
-    { id: 1, titulo: "Duna", autor: "Frank Herbert", ano: 1965 },
-    { id: 2, titulo: "Os Irmãos Karamazov", autor: "Fiódor Dostoiévski", ano: 1880 },
-    { id: 3, titulo: "O Problema dos Três Corpos", autor: "Cixin Liu", ano: 2008 },
-    { id: 4, titulo: "Neuromancer", autor: "William Gibson", ano: 1984 },
-    { id: 5, titulo: "Cem Anos de Solidão", autor: "Gabriel García Márquez", ano: 1967 },
-    { id: 6, titulo: "O Guia do Mochileiro das Galáxias", autor: "Douglas Adams", ano: 1979 },
-    { id: 7, titulo: "Fundação", autor: "Isaac Asimov", ano: 1951 },
-    { id: 8, titulo: "Crime e Castigo", autor: "Fiódor Dostoiévski", ano: 1866 },
-    { id: 9, titulo: "Blade Runner: Do Androids Dream of Electric Sheep?", autor: "Philip K. Dick", ano: 1968 },
-    { id: 10, titulo: "O Silmarillion", autor: "J.R.R. Tolkien", ano: 1977 }
-];
-let proximoId = 11;
+/**
+ * 1. ROTA DE LISTAGEM (READ)
+ * Requisitos: Filtro por categoria, Ordenação e Paginação.
+ */
+app.get('/api/livros', (req, res) => {
+    try {
+        // Extrai parâmetros da URL (Query Params). Define valores padrão caso não sejam enviados.
+        let { limite = 5, pagina = 1, ordem = 'titulo', categoria } = req.query;
+        
+        // Cálculo do OFFSET: pula os registros das páginas anteriores
+        // Ex: Se estou na pág 2 com limite 5, o offset é 5 (pula os 5 primeiros)
+        const offset = (parseInt(pagina) - 1) * parseInt(limite);
+        
+        let sql = "SELECT * FROM livros";
+        let params = [];
 
-// GET - Listar todos
-app.get('/livros', (req, res) => {
-    res.json(livros);
+        // Filtro dinâmico: Se houver categoria, adiciona o WHERE na query
+        if (categoria) {
+            sql += " WHERE categoria = ?";
+            params.push(categoria);
+        }
+
+        // Adiciona ordenação e os limites da paginação
+        sql += ` ORDER BY ${ordem} LIMIT ? OFFSET ?`;
+        params.push(parseInt(limite), offset);
+
+        // Executa a query no banco e busca todos os resultados 
+        const dados = db.prepare(sql).all(...params);
+        
+        // Retorna os dados e informações de contexto da página
+        res.json({
+            pagina: parseInt(pagina),
+            limite: parseInt(limite),
+            total_na_pagina: dados.length,
+            dados 
+        });
+    } catch (error) {
+        res.status(500).json({ erro: "Erro ao buscar dados no servidor." });
+    }
 });
 
-// GET - Buscar por ID (Boa prática)
-app.get('/livros/:id', (req, res) => {
-    const id = parseInt(req.params.id);
-    const livro = livros.find(l => l.id === id);
-    if (!livro) return res.status(404).json({ erro: "Livro não encontrado" });
-    res.json(livro);
-});
+/**
+ * 2. ROTA DE CRIAÇÃO (CREATE)
+ * Requisitos: Validações robustas e Status Code 201.
+ */
+app.post('/api/livros', (req, res) => {
+    const { titulo, autor, categoria, ano, estoque } = req.body;
 
-// POST - Criar livro
-app.post('/livros', (req, res) => {
-    const { titulo, autor, ano } = req.body;
-
-    // Validações completas
-    if (!titulo || !autor || typeof ano !== 'number') {
-        return res.status(400).json({ erro: "Dados inválidos. Verifique título, autor e ano." });
+    // Validação de segurança: Impede campos vazios no banco
+    if (!titulo || !autor || !categoria || !ano) {
+        return res.status(400).json({ erro: "Campos obrigatórios: titulo, autor, categoria e ano." });
     }
 
-    const novoLivro = { id: proximoId++, titulo, autor, ano };
-    livros.push(novoLivro);
-    res.status(201).json(novoLivro);
-});
-
-// PUT - Atualizar livro
-app.put('/livros/:id', (req, res) => {
-    const id = parseInt(req.params.id);
-    const { titulo, autor, ano } = req.body;
-
-    const index = livros.findIndex(l => l.id === id);
-    
-    if (index === -1) {
-        return res.status(404).json({ erro: "Livro não encontrado para atualização" });
+    try {
+        const stmt = db.prepare(`
+            INSERT INTO livros (titulo, autor, categoria, ano, estoque) 
+            VALUES (?, ?, ?, ?, ?)
+        `);
+        
+        const info = stmt.run(titulo, autor, categoria, ano, estoque || 0);
+        
+        // 201 Created: Indica que um novo recurso foi gerado com sucesso
+        res.status(201).json({ 
+            id: info.lastInsertRowid, // Retorna o ID gerado automaticamente pelo SQLite
+            ...req.body 
+        });
+    } catch (error) {
+        res.status(500).json({ erro: "Erro ao salvar o livro." });
     }
+});
 
-    // Validação dos dados novos
-    if (!titulo || !autor || typeof ano !== 'number') {
-        return res.status(400).json({ erro: "Dados inválidos para atualização" });
+/**
+ * 3. ROTA DE ATUALIZAÇÃO (UPDATE)
+ * Requisitos: Verificar se existe e retornar status correto.
+ */
+app.put('/api/livros/:id', (req, res) => {
+    const { id } = req.params; // Pega o ID da URL
+    const { titulo, autor, categoria, ano, estoque } = req.body;
+
+    try {
+        const stmt = db.prepare(`
+            UPDATE livros 
+            SET titulo = ?, autor = ?, categoria = ?, ano = ?, estoque = ? 
+            WHERE id = ?
+        `);
+        
+        const resultado = stmt.run(titulo, autor, categoria, ano, estoque || 0, id);
+
+        // Se 'changes' for 0, significa que o ID enviado não existe no banco
+        if (resultado.changes === 0) {
+            return res.status(404).json({ erro: "Livro não encontrado para atualização." });
+        }
+
+        res.json({ mensagem: "Livro atualizado com sucesso!", id });
+    } catch (error) {
+        res.status(500).json({ erro: "Erro ao atualizar dados." });
     }
-
-    livros[index] = { id, titulo, autor, ano };
-    res.json(livros[index]);
 });
 
-// DELETE - Remover livro
-app.delete('/livros/:id', (req, res) => {
-    const id = parseInt(req.params.id);
-    const index = livros.findIndex(l => l.id === id);
+/**
+ * 4. ROTA DE EXCLUSÃO (DELETE)
+ * Requisitos: Retornar 204 No Content.
+ */
+app.delete('/api/livros/:id', (req, res) => {
+    try {
+        const stmt = db.prepare('DELETE FROM livros WHERE id = ?');
+        const resultado = stmt.run(req.params.id);
 
-    if (index === -1) {
-        return res.status(404).json({ erro: "Livro não encontrado para exclusão" });
+        if (resultado.changes === 0) {
+            return res.status(404).json({ erro: "Livro não encontrado para exclusão." });
+        }
+
+        // 204 No Content: Sucesso absoluto, mas não há corpo na resposta 
+        res.status(204).send();
+    } catch (error) {
+        res.status(500).json({ erro: "Erro ao deletar registro." });
     }
-
-    livros.splice(index, 1);
-    res.status(204).send(); // 204 No Content é o correto para Delete
 });
 
-// Info do sistema
-app.get('/info', (req, res) => {
-    res.json({
-        projeto: "API REST de Livros - Trabalho 2",
-        estudante: "João Vitor Ribeiro",
-        status: "CRUD 100% Funcional"
-    });
-});
-
+// Inicia o servidor na porta 3000
+const PORT = 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 Servidor rodando em http://localhost:${PORT}`);
+    console.log(`Servidor rodando em http://localhost:${PORT}`);
+    console.log(` Use GET http://localhost:${PORT}/api/livros para ver os registros.`);
 });
